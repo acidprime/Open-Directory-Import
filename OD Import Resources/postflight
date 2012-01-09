@@ -1,0 +1,417 @@
+#!/bin/bash
+declare -x DIRADMIN_USER="diradmin"
+declare -x DIRADMIN_PASS="wermhole" # Obtained from Auto Server Setup
+
+[ "$EUID" != 0 ] &&
+        printf "%s\n" "This script requires root access ($EUID)!" && exit 1
+
+[ ! -f /System/Library/CoreServices/ServerVersion.plist ] &&
+	printf "%s\n" "This should be run on Mac OS X Server!" && exit 1
+
+declare -x PKGBUNDLE="$1"       #       Full path to the install package.
+declare -x DSTROOT="$3"         #       Installation Volume of mount point.
+declare -x SYSROOT="$4"         #       The root directory for the system.
+
+declare -x PKG_RESOURCES="${PKGBUNDLE:?}/Contents/Resources/"
+declare -x WORK_GROUPS="workgroups" # Sub Directory in resources directory
+declare -x COMPUTER_LISTS="computerlists"
+
+# Required commands
+declare -x awk="/usr/bin/awk"
+declare -x basename="/usr/bin/basename"
+declare -x dscl="/usr/bin/dscl"
+declare -x defaults="/usr/bin/defaults"
+declare -x dsimport="/usr/bin/dsimport"
+declare -x cat="/bin/cat"
+declare -x du="/usr/bin/du"
+declare -x hostname="/bin/hostname"
+declare -x id="/usr/bin/id"
+declare -x ntpdate="ntpdate"
+declare -x scutil="/usr/sbin/scutil"
+declare -x slapconfig="/usr/sbin/slapconfig"
+declare -x perl="/usr/bin/perl"
+declare -x ping="/sbin/ping"
+declare -x plistbuddy="/usr/libexec/PlistBuddy"
+declare -x basename="/usr/bin/basename"
+declare -x date="/bin/date" 
+declare -x defaults="/usr/bin/defaults"
+declare -x dscl="/usr/bin/dscl"
+declare -x find="/usr/bin/find"
+declare -x groups="/usr/bin/groups"
+declare -x ldapadd="/usr/bin/ldapadd"
+declare -x ls="/bin/ls"
+declare -x mv="/bin/mv"
+declare -x rm="/bin/rm "
+declare -x rmdir="/bin/rmdir"
+declare -x tr="/usr/bin/tr"
+declare -x sudo="/usr/bin/sudo"
+
+# -- Runtime varibles
+declare -x REQCMDS="$awk $dscl $deaults $ntpdate $perl $scutil"
+declare -x SCRIPT="${0##*/}" ; SCRIPTNAME="${SCRIPT%%\.*}"
+declare -x SCRIPTPATH="$0" RUNDIRECTORY="${0%/*}"
+declare -x SYSTEMVERSION="/System/Library/CoreServices/SystemVersion.plist"
+declare -x OSVER="$("$defaults" read "${SYSTEMVERSION%.plist}" ProductVersion )"
+#declare -x CONFIGFILE="${RUNDIRECTORY:?}/${SCRIPTNAME}.conf"
+declare -x BUILDVERSION="2009051"
+
+#[ "$EUID" != 0 ] &&	printf "%s\n" "This script requires root access ($EUID)!" && exit 1
+
+# -- Start the script log
+# Set to "VERBOSE" for more logging prior to using -v
+declare -x LOGLEVEL="NORMAL" SCRIPTLOG="/Library/Logs/odimport.log"
+
+declare -i CURRENT_LOG_SIZE="$("$du" -hm "${SCRIPTLOG:?}" |
+                                "$awk" '/^[0-9]/{print $1;exit}')"
+
+if [ ${CURRENT_LOG_SIZE:=0} -gt 50 ] ; then
+	"$rm" "$SCRIPTLOG"
+        printf "%s\n" "LOGSIZE:$CURRENT_LOG_SIZE, too large removing"
+fi
+
+exec 2>>"${SCRIPTLOG:?}" # Redirect standard error to log file
+# Strip any extention from scriptname and log stderr to script log
+if [ -n ${SCRIPTLOG:?"The script log has not been specified"} ] ; then
+	printf "%s\n" \
+"STARTED:$SCRIPTNAME:EUID:$EUID:$("$date" +%H:%M:%S): Mac OS X $OSVER:BUILD:$BUILDVERSION" >>"${SCRIPTLOG:?}"
+	printf "%s\n" "Log file is: ${SCRIPTLOG:?}"
+fi
+
+statusMessage() { # Status message function with type and now color!
+# Requires SCRIPTLOG STATUS_TYPE=1 STATUS_MESSAGE=2
+
+declare date="${date:="/bin/date"}"
+declare DATE="$("$date" -u "+%Y-%m-%d")"
+declare STATUS_TYPE="$1" STATUS_MESSAGE="$2"
+if [ "$ENABLECOLOR" = "YES"  ] ; then
+	# Background Color
+	declare REDBG="41" WHITEBG="47" BLACKBG="40"
+	declare YELLOWBG="43" BLUEBG="44" GREENBG="42"
+	# Foreground Color
+	declare BLACKFG="30" WHITEFG="37" YELLOWFG="33"
+	declare BLUEFG="36" REDFG="31"
+	declare BOLD="1" NOTBOLD="0"
+	declare format='\033[%s;%s;%sm%s\033[0m\n'
+	# "Bold" "Background" "Forground" "Status message"
+	printf '\033[0m' # Clean up any previous color in the prompt
+else
+	declare format='%s\n'
+fi
+# Function only seems to work on intel and higher.
+showUIDialog(){
+statusMessage header "FUNCTION: #	$FUNCNAME" ; unset EXITVALUE TRY
+"$killall" -HUP "System Events" 2>/dev/null
+declare -x UIMESSAGE="$1"
+"$osascript" <<EOF
+try
+with timeout of 0.1 seconds
+	tell application "System Events"
+		set UIMESSAGE to (system attribute "UIMESSAGE") as string
+		activate
+			display dialog UIMESSAGE with icon 2 giving up after "3600" buttons "Dismiss" default button "Dismiss"
+		end tell
+	end timeout
+end try
+EOF
+return 0
+} # END showUIDialog()
+case "${STATUS_TYPE:?"Error status message with null type"}" in
+	progress) \
+	[ -n "$LOGLEVEL" ] &&
+	printf $format $NOTBOLD $WHITEBG $BLACKFG "PROGRESS:$STATUS_MESSAGE"  ;
+	printf "%s\n" "$DATE:PROGRESS: $STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;;
+	# Used for general progress messages, always viewable
+	
+	notice) \
+	printf "%s\n" "$DATE:NOTICE:$STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;
+	[ -n "$LOGLEVEL" ] &&
+	printf $format $NOTBOLD $YELLOWBG $BLACKFG "NOTICE  :$STATUS_MESSAGE"  ;;
+	# Notifications of non-fatal errors , always viewable
+	
+	error) \
+	printf "%s\n\a" "$DATE:ERROR:$STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;
+	[ -n "$LOGLEVEL" ] &&
+	printf $format $NOTBOLD $REDBG $YELLOWFG "ERROR   :$STATUS_MESSAGE"  ;;
+	# Errors , always viewable
+
+	verbose) \
+	printf "%s\n" "$DATE:VERBOSE: $STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;
+	[ "$LOGLEVEL" = "VERBOSE" ] &&
+	printf $format $NOTBOLD $WHITEBG $BLACKFG "VERBOSE :$STATUS_MESSAGE" ;;
+	# All verbose output
+	
+	header) \
+	[ "$LOGLEVEL" = "BEBUG" ] &&
+	printf $format $NOTBOLD $BLUEBG $BLUEFG "VERBOSE :$STATUS_MESSAGE" ;
+	printf "%s\n" "$DATE:PROGRESS: $STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;;
+	# Function and section headers for the script
+	
+	passed) \
+	[  -n "$LOGLEVEL" ] &&
+	printf $format $NOTBOLD $GREENBG $BLACKFG "SANITY  :$STATUS_MESSAGE" ;
+	printf "%s\n" "$DATE:SANITY: $STATUS_MESSAGE" >> "${SCRIPTLOG:?}" ;;
+	# Sanity checks and "good" information
+	graphical) \
+	[ "$GUI" = "ENABLED" ] &&
+	showUIDialog "$STATUS_MESSAGE" ;;
+	
+esac
+return 0
+} # END statusMessage()
+
+die() { # die Function
+statusMessage header "FUNCTION: #       $FUNCNAME" ; unset EXITVALUE
+declare LASTDIETYPE="$1" LAST_MESSAGE="$2" LASTEXIT="$3"
+declare LASTDIETYPE="${LASTDIETYPE:="UNTYPED"}"
+if [ ${LASTEXIT:="192"} -gt 0 ] ; then
+        statusMessage error "$LASTDIETYPE :$LAST_MESSAGE:EXIT:$LASTEXIT"
+        # Print specific error message in red
+else
+        statusMessage verbose "$LASTDIETYPE :$LAST_MESSAGE:EXIT:$LASTEXIT"
+        # Print specific error message in white
+fi
+	statusMessage verbose "COMPLETED:$SCRIPT IN $SECONDS SECONDS"
+	"$killall" "System Events"
+exit "${LASTEXIT}"      # Exit with last status or 192 if none.
+return 1                # Should never get here
+} # END die()
+
+
+cleanUp() { # -- Clean up of our inportant sessions variables and functions.
+statusMessage header "FUNCTION: #       $FUNCNAME" ; unset EXITVALUE
+statusMessage verbose "TIME: $SCRIPT ran in $SECONDS seconds"
+unset -f ${!check*}
+[ "${ENABLECOLOR:-"ENABLECOLOR"}" = "YES"  ] && printf '\033[0m' # Clear Color
+
+if [ "$PPID" == 1 ] ; then # LaunchD is always PID 1 in 10.4+
+	: # Future LaunchD code
+fi
+exec 2>&- # Reset the error redirects
+return 0
+} # END cleanUp()
+
+# Check script options
+statusMessage header "GETOPTS: Processing script $# options:$@"
+# ABOVE: Check to see if we are running as a postflight script,the installer  creates $SCRIPT_NAME
+[ $# = 0 ] && statusMessage verbose "No options given"
+# If we are not running postflight and no parameters given, print usage to stderr and exit status 1
+while getopts vDCup:f: SWITCH ; do
+        case $SWITCH in
+	   	v ) export LOGLEVEL="VERBOSE" ;;
+                C ) export ENABLECOLOR="YES" ;;
+                D ) export LOGLEVEL="DEBUG" ;;
+		u ) export GUI="ENABLED" ;;
+        	p ) export PORT="$OPTARG" ;;
+		f ) export CSV_FILE="$OPTARG" ;;
+	esac
+done # END getopts
+
+checkCommands() { # CHECK_CMDS Required Commands installed check using the REQCMDS varible.
+declare -i FUNCSECONDS="$SECONDS" # Capture start time
+statusMessage header  "FUNCTION: #      ${FUNCNAME}" ; unset EXITVALUE
+declare REQCMDS="$1"
+for RQCMD in ${REQCMDS:?} ; do
+        if [  -x "$RQCMD" ] ; then
+                statusMessage passed "PASSED: $RQCMD is executable"
+        else
+        # Export the command Name to the die status message can refernce it"
+                export RQCMD ; return 1
+        fi
+        done
+return 0
+declare -i FUNCTIME=$(( ${SECONDS:?} - ${FUNCSECONDS:?} ))
+[ "${FUNCTIME:?}" != 0 ] &&
+statusMessage verbose "TIME:$FUNCNAME:Took $FUNCTIME seconds to EXIT:$EXITVALUE"
+} # END checkCommands()
+
+
+checkSystemVersion() { 
+# CHECK_OS Read the /Sys*/Lib*/CoreSer*/S*Version.plist value for OS version
+statusMessage header "FUNCTION: #	${FUNCNAME}" ; unset EXITVALUE
+declare OSVER="$1"
+case "${OSVER:?}" in
+	10.0* | 10.1* | 10.2* | 10.3* | 10.4*) \
+	die ERROR "$FUNCNAME: Unsupported OS version: $OSVER." 192 ;;
+	
+    	10.5*) \
+	statusMessage passed "CHECK_OS: OS check: $OSVER successful!";
+	return 0;;
+	
+	10.6*) \
+	die ERROR "$FUNCNAME:$LINENO Unsupported OS:$OSVER is too new." 192 ;;
+
+	*) \
+	die ERROR "CHECK_OS:$LINENO Unsupported OS:$OSVER unknown error" 192 ;;
+esac
+return 1
+} # END checkSystemVersion()
+
+checkLineEndings(){
+	declare -i FUNCSECONDS="$SECONDS" # Capture start time
+	declare FILE_TO_CHECK="$1"
+	statusMessage header  "FUNCTION: #      ${FUNCNAME}" ; unset EXITVALUE
+	if [ -f "$FILE_TO_CHECK" ] ; then
+		if ! $perl -ne "exit 1 if m/\r\n/;" "$FILE_TO_CHECK" ; then
+			statusMessage notice \
+			"Incorrect line endings detected (probobly due to Mircosoft edit)"
+			statusMessage notice \
+			"Backup: $CSV_FILE.bak"
+			$cp -f "$FILE_TO_CHECK" "$FILE_TO_CHECK".bak
+			statusMessage verbose 'Resetting line endings \r/\n/ to \n'
+			$perl -i -pe 's/\r/\n/g' "$FILE_TO_CHECK"
+		elif ! $perl -ne "exit 1 if m/\r/;" "$FILE_TO_CHECK" ; then
+			statusMessage notice \
+			"Incorrect line endings detected (DOS?) fixing backup: $FILE_TO_CHECK.bak"
+			$cp -f "$FILE_TO_CHECK" "$FILE_TO_CHECK".bak
+			statusMessage verbose 'Resetting line endings \r/\n/'
+			$perl -i -pe 's/\r/\n/g' "$FILE_TO_CHECK"
+
+		fi
+	else
+		statusMessage error "File: $FILE_TO_CHECK does not exist"
+		die ERROR "Invalid file specified: $FILE_TO_CHECK"
+	fi
+	statusMessage verbose "TIME:$FUNCNAME:Took $FUNCTIME seconds to EXIT:$EXITVALUE"
+}
+
+
+
+checkMaster(){
+	statusMessage header "FUNCTION: #       $FUNCNAME" ; unset EXITVALUE TRY
+	declare -x IS_MASTER="1.1"
+	declare -x IS_DIRECTORY_CLIENT="2"
+	declare -x IS_STANDALONE="3"
+	declare -x IS_REPLICA="6.1"
+	
+	declare -x CHECK_STYLE="$($slapconfig -getstyle | 
+				$awk '{print $1;exit}')"
+case "${CHECK_STYLE:?}" in
+	${IS_MASTER:?} ) \
+	return 0 ;;
+        ${IS_REPLICA:?} ) \
+	return 0 ;;
+	${IS_DIRECTORY_CLIENT:?} ) \
+	return 1 ;;
+	${IS_STANDALONE:?} ) \
+	return 1 ;;
+esac
+return 1
+}
+
+checkIfLDAPEnabled(){
+	declare LDAP_IS="$($defaults read /Library/Preferences/DirectoryService/DirectoryService LDAPv3)"
+	if [ "$LDAP_IS" = "Active" ] ; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+getAdminPassword(){
+declare FILE="$1"
+export DIRADMIN_PASS="$($plistbuddy -c "Print :AdminUser:password" "$FILE")"
+	if [ ${#DIRADMIN_PASS} -gt 1 ] ; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+returnPassword(){
+export tr="${tr:="/sbin/ifconfig"}"
+export basename="${basename:="/usr/bin/basename"}"
+export ipconfig="${ipconfig:="/usr/sbin/ipconfig"}"
+export ifconfig="${ifconfig:="/sbin/ifconfig"}"
+OLDIFS="$IFS"
+IFS=$'\n' # Reset field seperator to newline for spaces in the paths
+# First Alphanumeric File that is found wins, not sure how Apple does this as its not documented (AFAIK)
+for FILE in `$ls /Volumes/*/Auto\ Server\ Setup/*.plist` ; do
+	declare FILE_NAME="$($basename "$FILE" | $tr [:upper:] [:lower:])"
+	# Find file name from path (Should be converted to awk)
+	declare -i IS_IP_OR_HOSTNAME="$(printf "%s" "$FILE_NAME" |
+			$awk 'BEGIN{FS=""}/\./{seen++}END{print seen}')"
+	if [ $IS_IP_OR_HOSTNAME -ge 1 ] ; then
+		if [ "$HOST_NAME" = "${FILE_NAME%%.plist}" ] ; then
+			getAdminPassword "$FILE" && export FOUND="true"
+			return 0	
+		else # If its not out HOSTNAME, how about our IP(s)?
+			for (( N = 0 ; N <=${ENX_NUM:="1"}; N++ )) ; do
+				for IPS in `$ipconfig getifaddr "en$N" 2>/dev/null` ; do
+					if [ "$IPS" = "${FILE_NAME%%.plist}" ] ; then
+						getAdminPassword "$FILE" && export FOUND="true"
+						return 0	
+					fi
+				done
+			done
+		fi
+	fi # END IP check
+	declare -i FILE_NAME_LEN="$(printf "%s" "$FILE_NAME" | $awk 'BEGIN{FS=""}{print NF}')"	
+	
+	# Check for Serial Number file bases on file length (hostnames and IPs caught before this )
+	if [ $FILE_NAME_LEN -le 8 ] ; then
+		if [ "${FILE_NAME%%.plist}" = "$($serialnumber)" ] ; then
+			getAdminPassword "$FILE" && export FOUND="true"
+			return 0	
+		else
+			continue	
+		fi
+        # Larger then or equal to 19 with no "." then its probobly a MAC
+	elif [ $FILE_NAME_LEN -ge 10 ] ; then
+		for ETHER in `$ifconfig | $awk '/^.*ether/{gsub(":","",$NF);print tolower($NF)}'` ; do
+			if [ "${FILE_NAME%%.plist}" = "${ETHER}" ] ; then
+				getAdminPassword "$FILE" && export FOUND="true"
+				return 0	
+			else
+				continue		
+			fi
+        	done
+	fi
+done
+}
+OLDIFS="$IFS" # Reset Field Seperator
+
+checkIfLDAPEnabled || echo "LDAPv3 Plugin is not Active" # Need to add die here
+
+if checkMaster ; then
+	export LDAP_SERVER="127.0.0.1"
+else
+	for CONFIGURED_SERVER in `$dscl localhost list /LDAPv3` ; do
+		export LDAP_SERVER="$CONFIGURED_SERVER"
+		break
+	done
+fi
+
+returnPassword # exports DIRADMIN_PASS var
+
+declare -x HOST_NAME="$($hostname)"
+declare -x SEARCH_DOMAIN="$(printf "${HOST_NAME:?}" | 
+		$awk '{printf "dc="; gsub(/\./,",dc=",$0); printf $0}')"
+case "${HOST_NAME/.*}" in
+	*es* ) declare SCHOOL_TYPE="es";;
+	*ms* ) declare SCHOOL_TYPE="ms";;
+	*hs* ) declare SCHOOL_TYPE="hs";;
+	* ) declare SCHOOL_TYPE="error" ;;
+esac
+echo SCHOOL_TYPE:$SCHOOL_TYPE
+if [ "$SCHOOL_TYPE" = "error" ] ; then
+	echo "Error SCHOOL type is invalid"
+	exit 1
+fi
+
+OLDIFS="$IFS"
+IFS=$'\n'
+echo "Importing WorkGroups..."
+for DSIMPORT in "$PKG_RESOURCES/${WORK_GROUPS:?}/${SCHOOL_TYPE:?}"/* ; do
+	$dsimport -g "${DSIMPORT:?}" "/LDAPv3/${LDAP_SERVER:?}" I -u "${DIRADMIN_USER:?}" -p "${DIRADMIN_PASS:?}"
+done
+echo "Importing Computerlists..."
+declare -x MY_COMPUTER_LIST="$PKG_RESOURCES/${COMPUTER_LISTS:?}/${HOST_NAME:=$HOSTNAME}"
+if [ -f "$MY_COMPUTER_LIST" ] ; then
+$ldapadd -x -D "uid=${DIRADMIN_USER:?},cn=users,${SEARCH_DOMAIN:?}" -w "${DIRADMIN_PASS:?}" -f "${MY_COMPUTER_LIST:?}"
+else
+	echo "Missing file:$MY_COMPUTER_LIST"
+	exit 1
+fi
+OLDIFS="$IFS"
+unset DIRADMIN_PASS
+exit 0

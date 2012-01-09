@@ -1,0 +1,10 @@
+#!/bin/bash
+declare HOST_NAME="$1"
+case "${HOST_NAME/.*}" in
+	*d1 ) declare SCHOOL_TYPE="error";;
+	*d2 ) declare SCHOOL_TYPE="error";;
+	*es ) declare SCHOOL_TYPE="es";;
+	*ms ) declare SCHOOL_TYPE="ms";;
+	*hs ) declare SCHOOL_TYPE="hs";;
+esac
+echo SCHOOL_TYPE:$SCHOOL_TYPE

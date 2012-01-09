@@ -1,0 +1,16 @@
+#!/bin/bash
+declare -x defaults="/usr/bin/defaults"
+
+declare -x TEST_VOLUME="$1"       # Full path to the install package.
+declare -x SYSTEMVERSION="${TEST_VOLUME:?}/System/Library/CoreServices/ServerVersion.plist"
+declare -x OSVER="$("$defaults" read "${SYSTEMVERSION%.plist}" ProductVersion )"
+if [ ! -f "${SYSTEMVERSION:?}" ] ; then
+	echo "This script requires Mac OS X Server"
+	exit $((1 << 5  | 17 ))
+fi
+case "${OSVER:?}" in
+       10.0* | 10.1* | 10.2* | 10.3* | 10.4* ) \
+       exit $((1 << 5  | 16 ));;
+       *) exit 0;;
+esac
+exit 0
