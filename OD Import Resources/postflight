@@ -1,6 +1,6 @@
 #!/bin/bash
 declare -x DIRADMIN_USER="diradmin"
-declare -x DIRADMIN_PASS="wermhole" # Obtained from Auto Server Setup
+declare -x DIRADMIN_PASS="foo" # Obtained from Auto Server Setup
 
 [ "$EUID" != 0 ] &&
         printf "%s\n" "This script requires root access ($EUID)!" && exit 1
